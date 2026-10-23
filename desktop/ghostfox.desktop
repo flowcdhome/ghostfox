@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=GhostFox
+GenericName=Private OSINT Browser
+Comment=Privacy-first customizable browser
+Exec=ghostfox
+Icon=firefox
+Terminal=false
+Categories=Network;WebBrowser;
+Keywords=osint;privacy;browser;proxy;

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GhostFox Settings
+Comment=Edit fingerprint, proxy, DNS and CSS
+Exec=ghostfox gui
+Icon=preferences-system
+Terminal=false
+Categories=Settings;Network;

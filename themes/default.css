@@ -1,0 +1,10 @@
+/* GhostFox userChrome.css - browser interface styles. Restart the browser after editing. */
+:root { --ghost-accent: #7aa2f7; }
+#nav-bar { background: #11111b !important; }
+#TabsToolbar { background: #0b0b12 !important; }
+.tabbrowser-tab[selected] .tab-background { background: var(--ghost-accent) !important; }
+
+/* Ideas (uncomment):
+#TabsToolbar { visibility: collapse !important; }   hide the tab bar
+#sidebar-header { display: none !important; }
+*/

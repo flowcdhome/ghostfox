@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=GhostFox Menu
+Comment=Choose a GhostFox profile in rofi
+Exec=ghostfox rofi
+Icon=firefox
+Terminal=false
+Categories=Network;
+Keywords=osint;privacy;profile;

@@ -1,0 +1,373 @@
+#!/usr/bin/env python3
+"""GhostFox - privacy-first, fully customizable OSINT browser launcher (Firefox-based)."""
+import argparse, json, os, re, shlex, shutil, subprocess, sys, urllib.request
+from pathlib import Path
+
+VERSION = "0.1.0"
+REPO = Path(__file__).resolve().parent
+CONF = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "ghostfox"
+PROFILES = CONF / "profiles"
+BROWSERS = ["librewolf", "firefox", "firefox-esr", "firefox-developer-edition"]
+TERMINALS = ["kitty", "alacritty", "foot", "xfce4-terminal", "konsole", "xterm"]
+UBLOCK = "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi"
+
+DEFAULT = {
+    "user_agent": "",              # empty = browser default (or generic one with RFP)
+    "platform": "",                # e.g. Win32, Linux x86_64
+    "language": "en-US,en",
+    "timezone": "",                # e.g. Europe/Berlin (ignored while RFP is on: it forces UTC)
+    "start_page": "about:blank",
+    "resist_fingerprinting": True,
+    "webrtc": False,
+    "webgl": False,
+    "clear_on_exit": True,
+    "window": {"width": 1280, "height": 800},
+    "proxy": {"type": "none", "host": "", "port": 0},      # none | socks5 | http
+    "dns": {"doh": "https://dns.quad9.net/dns-query", "mode": 3},  # 0 system, 2 DoH+fallback, 3 DoH only, 5 off
+    "extra_prefs": {},             # any about:config pref, applied last: {"pref.name": value}
+}
+
+STARTER_CSS = """/* GhostFox userContent.css - styles for web pages. Restart the browser after editing. */
+* { scrollbar-width: thin; }
+"""
+
+
+def valid(name):
+    return bool(re.fullmatch(r"[\w.-]+", name or ""))
+
+
+def merge(base, over):
+    out = json.loads(json.dumps(base))
+    for k, v in over.items():
+        out[k] = merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def load_cfg(name):
+    f = PROFILES / name / "config.json"
+    return merge(DEFAULT, json.loads(f.read_text(encoding="utf-8"))) if f.exists() else json.loads(json.dumps(DEFAULT))
+
+
+def save_cfg(name, cfg):
+    (PROFILES / name).mkdir(parents=True, exist_ok=True)
+    (PROFILES / name / "config.json").write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def list_profiles():
+    if not PROFILES.exists():
+        return []
+    return sorted(p.name for p in PROFILES.iterdir() if (p / "config.json").exists())
+
+
+def install_ublock(d):
+    ext = d / "firefox" / "extensions"
+    ext.mkdir(parents=True, exist_ok=True)
+    try:
+        req = urllib.request.Request(UBLOCK, headers={"User-Agent": "ghostfox"})
+        (ext / "uBlock0@raymondhill.net.xpi").write_bytes(urllib.request.urlopen(req, timeout=30).read())
+        print("+ uBlock Origin added to the profile")
+    except Exception as e:
+        print(f"! could not download uBlock Origin ({e}), install it from the browser")
+
+
+def create(name):
+    if not valid(name):
+        sys.exit("profile name: letters, digits, _ . - only")
+    d = PROFILES / name
+    if (d / "config.json").exists():
+        return d
+    chrome = d / "firefox" / "chrome"
+    chrome.mkdir(parents=True, exist_ok=True)
+    save_cfg(name, DEFAULT)
+    theme = REPO / "themes" / "default.css"
+    (chrome / "userChrome.css").write_text(theme.read_text(encoding="utf-8") if theme.exists() else "/* userChrome.css */\n", encoding="utf-8")
+    (chrome / "userContent.css").write_text(STARTER_CSS, encoding="utf-8")
+    install_ublock(d)
+    print(f"+ profile '{name}' created in {d}")
+    return d
+
+
+def build_prefs(cfg):
+    rfp = bool(cfg["resist_fingerprinting"])
+    p = {
+        "toolkit.legacyUserProfileCustomizations.stylesheets": True,
+        "extensions.autoDisableScopes": 0,
+        "browser.shell.checkDefaultBrowser": False,
+        "browser.startup.page": 1,
+        "browser.startup.homepage": cfg["start_page"] or "about:blank",
+        "browser.newtabpage.enabled": False,
+        "browser.aboutwelcome.enabled": False,
+        "datareporting.healthreport.uploadEnabled": False,
+        "datareporting.policy.dataSubmissionEnabled": False,
+        "toolkit.telemetry.enabled": False,
+        "toolkit.telemetry.unified": False,
+        "toolkit.telemetry.archive.enabled": False,
+        "app.shield.optoutstudies.enabled": False,
+        "app.normandy.enabled": False,
+        "browser.discovery.enabled": False,
+        "extensions.pocket.enabled": False,
+        "browser.urlbar.suggest.quicksuggest.sponsored": False,
+        "browser.urlbar.suggest.quicksuggest.nonsponsored": False,
+        "browser.search.suggest.enabled": False,
+        "browser.urlbar.suggest.searches": False,
+        "network.prefetch-next": False,
+        "network.dns.disablePrefetch": True,
+        "network.predictor.enabled": False,
+        "network.http.speculative-parallel-limit": 0,
+        "browser.send_pings": False,
+        "beacon.enabled": False,
+        "geo.enabled": False,
+        "privacy.donottrackheader.enabled": True,
+        "privacy.globalprivacycontrol.enabled": True,
+        "privacy.trackingprotection.enabled": True,
+        "privacy.trackingprotection.fingerprinting.enabled": True,
+        "privacy.trackingprotection.cryptomining.enabled": True,
+        "network.cookie.cookieBehavior": 5,
+        "dom.security.https_only_mode": True,
+        "network.http.referer.XOriginPolicy": 2,
+        "network.http.referer.XOriginTrimmingPolicy": 2,
+        "signon.rememberSignons": False,
+        "browser.formfill.enable": False,
+        "browser.sessionstore.privacy_level": 2,
+        "browser.safebrowsing.downloads.remote.enabled": False,
+        "media.peerconnection.enabled": bool(cfg["webrtc"]),
+        "webgl.disabled": not cfg["webgl"],
+        "privacy.resistFingerprinting": rfp,
+        "privacy.resistFingerprinting.letterboxing": rfp,
+        "intl.accept_languages": cfg["language"],
+    }
+    if cfg["user_agent"]:
+        p["general.useragent.override"] = cfg["user_agent"]
+    if cfg["platform"]:
+        p["general.platform.override"] = cfg["platform"]
+    if cfg["clear_on_exit"]:
+        p["privacy.sanitize.sanitizeOnShutdown"] = True
+        for k in ("cache", "cookies", "history", "downloads", "sessions", "offlineApps", "formdata", "siteSettings"):
+            p[f"privacy.clearOnShutdown.{k}"] = True
+        for k in ("cache", "cookiesAndStorage", "historyFormDataAndDownloads", "siteSettings"):
+            p[f"privacy.clearOnShutdown_v2.{k}"] = True
+
+    px, dns = cfg["proxy"], cfg["dns"]
+    host, port = px.get("host", ""), int(px.get("port") or 0)
+    if px.get("type") in ("socks5", "http") and host and port:
+        p["network.proxy.type"] = 1
+        p["network.proxy.no_proxies_on"] = ""
+        if px["type"] == "socks5":
+            p.update({"network.proxy.socks": host, "network.proxy.socks_port": port,
+                      "network.proxy.socks_version": 5, "network.proxy.socks_remote_dns": True})
+        else:
+            p.update({"network.proxy.http": host, "network.proxy.http_port": port,
+                      "network.proxy.ssl": host, "network.proxy.ssl_port": port})
+        p["network.trr.mode"] = 5   # the proxy resolves DNS, so nothing leaks around it
+    else:
+        p["network.proxy.type"] = 0
+        p["network.trr.mode"] = int(dns["mode"])
+        p["network.trr.uri"] = dns["doh"]
+        p["network.trr.custom_uri"] = dns["doh"]
+    p.update(cfg.get("extra_prefs", {}))
+    return p
+
+
+def find_browser():
+    custom = os.environ.get("GHOSTFOX_BROWSER")
+    if custom:
+        return custom
+    for b in BROWSERS:
+        if shutil.which(b):
+            return b
+    sys.exit("no Firefox-family browser found: sudo pacman -S firefox")
+
+
+def launch(name):
+    d = create(name)
+    cfg = load_cfg(name)
+    prefs = build_prefs(cfg)
+    (d / "firefox" / "user.js").write_text(
+        "".join(f"user_pref({json.dumps(k)}, {json.dumps(v)});\n" for k, v in prefs.items()), encoding="utf-8")
+    env = dict(os.environ)
+    if cfg["timezone"]:
+        env["TZ"] = cfg["timezone"]
+        if cfg["resist_fingerprinting"]:
+            print("! timezone is ignored while resist_fingerprinting is on (it forces UTC)")
+    px = cfg["proxy"]
+    if prefs.get("network.proxy.type") == 1:
+        print(f"* proxy {px['type']}://{px['host']}:{px['port']} (DNS goes through the proxy)")
+    else:
+        print(f"* DNS-over-HTTPS: {cfg['dns']['doh']} (mode {cfg['dns']['mode']})")
+    w = cfg["window"]
+    cmd = [find_browser(), "--no-remote", "--profile", str(d / "firefox"),
+           "--width", str(w["width"]), "--height", str(w["height"])]
+    subprocess.Popen(cmd, env=env, start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"> GhostFox started, profile '{name}'")
+
+
+def edit_file(path, block=True):
+    ed = os.environ.get("VISUAL") or os.environ.get("EDITOR") or next(
+        (e for e in ("nvim", "vim", "nano") if shutil.which(e)), None)
+    if ed and block and sys.stdin.isatty():
+        subprocess.call(shlex.split(ed) + [str(path)])
+        return
+    if ed:
+        for t in TERMINALS:
+            if shutil.which(t):
+                subprocess.Popen([t, "-e", *shlex.split(ed), str(path)], start_new_session=True)
+                return
+    subprocess.Popen(["xdg-open", str(path)], start_new_session=True)
+
+
+def dmenu(items, prompt):
+    if not shutil.which("rofi"):
+        sys.exit("rofi is not installed: sudo pacman -S rofi")
+    r = subprocess.run(["rofi", "-dmenu", "-i", "-p", prompt], input="\n".join(items),
+                       text=True, capture_output=True)
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+
+
+def rofi_menu():
+    profs = list_profiles() or ["default"]
+    c = dmenu([f"launch  {n}" for n in profs] + ["new profile", "edit config", "edit css", "settings window"], "ghostfox")
+    if not c:
+        return
+    if c.startswith("launch"):
+        launch(c.split(maxsplit=1)[1])
+    elif c == "new profile":
+        n = dmenu([], "new profile name")
+        if n and valid(n):
+            create(n)
+            launch(n)
+    elif c in ("edit config", "edit css"):
+        n = dmenu(profs, "profile")
+        if n:
+            f = "config.json" if c == "edit config" else "firefox/chrome/userChrome.css"
+            edit_file(PROFILES / n / f, block=False)
+    elif c == "settings window":
+        gui()
+
+
+def gui():
+    try:
+        import tkinter as tk
+        from tkinter import ttk, simpledialog, messagebox
+    except ImportError:
+        sys.exit("tkinter is missing: sudo pacman -S tk  |  Debian/Ubuntu: sudo apt install python3-tk")
+    create("default")
+    root = tk.Tk()
+    root.title("GhostFox")
+    frm = ttk.Frame(root, padding=12)
+    frm.grid(sticky="nsew")
+    frm.columnconfigure(1, weight=1)
+    cur = tk.StringVar(value=list_profiles()[0])
+    texts = [("User-Agent", "user_agent"), ("Platform", "platform"), ("Languages", "language"),
+             ("Timezone (Europe/Berlin)", "timezone"), ("Start page", "start_page")]
+    bools = [("Resist fingerprinting (RFP)", "resist_fingerprinting"), ("Enable WebRTC", "webrtc"),
+             ("Enable WebGL", "webgl"), ("Clear all data on exit", "clear_on_exit")]
+    tv = {k: tk.StringVar() for _, k in texts}
+    bv = {k: tk.BooleanVar() for _, k in bools}
+    ptype, phost, pport, pdoh, pmode = (tk.StringVar() for _ in range(5))
+    r = [0]
+
+    def row(label, w):
+        ttk.Label(frm, text=label).grid(row=r[0], column=0, sticky="w", padx=(0, 10), pady=3)
+        w.grid(row=r[0], column=1, sticky="ew", pady=3)
+        r[0] += 1
+
+    def load(*_):
+        c = load_cfg(cur.get())
+        for k in tv: tv[k].set(c[k])
+        for k in bv: bv[k].set(bool(c[k]))
+        ptype.set(c["proxy"]["type"]); phost.set(c["proxy"]["host"]); pport.set(str(c["proxy"]["port"]))
+        pdoh.set(c["dns"]["doh"]); pmode.set(str(c["dns"]["mode"]))
+
+    def save():
+        c = load_cfg(cur.get())
+        for k in tv: c[k] = tv[k].get().strip()
+        for k in bv: c[k] = bv[k].get()
+        try:
+            port = int(pport.get() or 0)
+        except ValueError:
+            messagebox.showerror("GhostFox", "Proxy port must be a number")
+            return False
+        c["proxy"] = {"type": ptype.get(), "host": phost.get().strip(), "port": port}
+        c["dns"] = {"doh": pdoh.get().strip(), "mode": int(pmode.get())}
+        save_cfg(cur.get(), c)
+        return True
+
+    def new():
+        n = simpledialog.askstring("GhostFox", "New profile name:")
+        if n and valid(n):
+            create(n)
+            box["values"] = list_profiles()
+            cur.set(n)
+            load()
+
+    box = ttk.Combobox(frm, textvariable=cur, values=list_profiles(), state="readonly")
+    box.bind("<<ComboboxSelected>>", load)
+    row("Profile", box)
+    for label, k in texts:
+        row(label, ttk.Entry(frm, textvariable=tv[k], width=50))
+    row("Proxy type", ttk.Combobox(frm, textvariable=ptype, values=["none", "socks5", "http"], state="readonly"))
+    row("Proxy host", ttk.Entry(frm, textvariable=phost))
+    row("Proxy port", ttk.Entry(frm, textvariable=pport))
+    row("DoH server URL", ttk.Entry(frm, textvariable=pdoh))
+    row("DNS mode (0 sys, 2 DoH+fallback, 3 DoH only, 5 off)",
+        ttk.Combobox(frm, textvariable=pmode, values=["0", "2", "3", "5"], state="readonly"))
+    for label, k in bools:
+        ttk.Checkbutton(frm, text=label, variable=bv[k]).grid(row=r[0], column=0, columnspan=2, sticky="w")
+        r[0] += 1
+    bar = ttk.Frame(frm)
+    bar.grid(row=r[0], column=0, columnspan=2, pady=(12, 0))
+    for text, fn in [("Save", save),
+                     ("Save & launch", lambda: save() and launch(cur.get())),
+                     ("Edit CSS", lambda: edit_file(PROFILES / cur.get() / "firefox/chrome/userChrome.css", False)),
+                     ("Edit JSON", lambda: edit_file(PROFILES / cur.get() / "config.json", False)),
+                     ("New profile", new)]:
+        ttk.Button(bar, text=text, command=fn).pack(side="left", padx=3)
+    load()
+    root.mainloop()
+
+
+def update():
+    if not (REPO / ".git").exists():
+        sys.exit("not a git checkout, update manually")
+    subprocess.call(["git", "-C", str(REPO), "pull", "--ff-only"])
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="ghostfox", description="GhostFox - privacy-first OSINT browser launcher")
+    ap.add_argument("-v", "--version", action="version", version=f"ghostfox {VERSION}")
+    sub = ap.add_subparsers(dest="cmd")
+    s = sub.add_parser("run", help="launch a profile (default)"); s.add_argument("name", nargs="?", default="default")
+    s = sub.add_parser("new", help="create a profile"); s.add_argument("name")
+    sub.add_parser("list", help="list profiles")
+    s = sub.add_parser("edit", help="edit profile config.json"); s.add_argument("name", nargs="?", default="default")
+    s = sub.add_parser("css", help="edit userChrome.css"); s.add_argument("name", nargs="?", default="default")
+    s = sub.add_parser("delete", help="delete a profile"); s.add_argument("name")
+    sub.add_parser("gui", help="settings window")
+    sub.add_parser("rofi", help="rofi menu")
+    sub.add_parser("update", help="git pull the latest version")
+    a = ap.parse_args()
+
+    if a.cmd in (None, "run"):
+        launch(getattr(a, "name", "default"))
+    elif a.cmd == "new":
+        create(a.name)
+    elif a.cmd == "list":
+        print("\n".join(list_profiles()) or "(no profiles yet, run: ghostfox)")
+    elif a.cmd in ("edit", "css"):
+        create(a.name)
+        edit_file(PROFILES / a.name / ("config.json" if a.cmd == "edit" else "firefox/chrome/userChrome.css"))
+    elif a.cmd == "delete":
+        if valid(a.name) and (PROFILES / a.name).exists() and input(f"type '{a.name}' to delete: ") == a.name:
+            shutil.rmtree(PROFILES / a.name)
+            print("deleted")
+    elif a.cmd == "gui":
+        gui()
+    elif a.cmd == "rofi":
+        rofi_menu()
+    elif a.cmd == "update":
+        update()
+
+
+if __name__ == "__main__":
+    main()
