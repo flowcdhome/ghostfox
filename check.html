@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>GhostFox check</title>
+<style>
+body{font:15px monospace;background:#11111b;color:#cdd6f4;padding:2em}
+h1{color:#7aa2f7}td{padding:4px 18px 4px 0;vertical-align:top}td:first-child{color:#a6e3a1}
+</style>
+<h1>👻 What websites see</h1>
+<table id="t"></table>
+<p>Compare with: browserleaks.com, coveryourtracks.eff.org, ipleak.net</p>
+<script>
+const rows = [];
+const add = (k, v) => rows.push([k, String(v)]);
+add("userAgent", navigator.userAgent);
+add("platform", navigator.platform);
+add("oscpu", navigator.oscpu);
+add("languages", (navigator.languages || []).join(", "));
+add("timezone", Intl.DateTimeFormat().resolvedOptions().timeZone);
+add("UTC offset (min)", new Date().getTimezoneOffset());
+add("screen", screen.width + "x" + screen.height);
+add("window", innerWidth + "x" + innerHeight);
+add("pixel ratio", devicePixelRatio);
+add("CPU threads", navigator.hardwareConcurrency);
+add("Do Not Track", navigator.doNotTrack);
+add("WebRTC", typeof RTCPeerConnection === "undefined" ? "disabled" : "enabled (can leak IP)");
+try {
+  const gl = document.createElement("canvas").getContext("webgl");
+  if (!gl) add("WebGL", "disabled");
+  else {
+    const e = gl.getExtension("WEBGL_debug_renderer_info");
+    add("WebGL renderer", e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : "hidden");
+  }
+} catch (e) { add("WebGL", "blocked"); }
+try {
+  const c = document.createElement("canvas"), x = c.getContext("2d");
+  x.font = "16px Arial"; x.fillText("ghostfox canvas test", 4, 20);
+  let h = 0; for (const ch of c.toDataURL()) h = (h * 31 + ch.charCodeAt(0)) | 0;
+  add("canvas hash", h);
+} catch (e) { add("canvas hash", "blocked"); }
+const t = document.getElementById("t");
+for (const [k, v] of rows) {
+  const tr = t.insertRow();
+  tr.insertCell().textContent = k;
+  tr.insertCell().textContent = v;
+}
+</script>

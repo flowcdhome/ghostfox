@@ -49,6 +49,8 @@ ghostfox edit work       # edit config.json
 ghostfox css work        # edit userChrome.css
 ghostfox gui             # settings window
 ghostfox rofi            # rofi menu (profiles, new, edit)
+ghostfox preset windows   # spoof preset: windows | mac | rfp
+ghostfox check           # page showing what websites see
 ghostfox update          # git pull the latest version
 ```
 

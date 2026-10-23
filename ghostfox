@@ -3,7 +3,7 @@
 import argparse, json, os, re, shlex, shutil, subprocess, sys, urllib.request
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 REPO = Path(__file__).resolve().parent
 CONF = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "ghostfox"
 PROFILES = CONF / "profiles"
@@ -88,7 +88,8 @@ def create(name):
 
 
 def build_prefs(cfg):
-    rfp = bool(cfg["resist_fingerprinting"])
+    custom = bool(cfg["user_agent"] or cfg["platform"] or cfg["timezone"])
+    rfp = bool(cfg["resist_fingerprinting"]) and not custom
     p = {
         "toolkit.legacyUserProfileCustomizations.stylesheets": True,
         "extensions.autoDisableScopes": 0,
@@ -140,6 +141,7 @@ def build_prefs(cfg):
         p["general.useragent.override"] = cfg["user_agent"]
     if cfg["platform"]:
         p["general.platform.override"] = cfg["platform"]
+        p["general.oscpu.override"] = {"Win32": "Windows NT 10.0; Win64; x64", "MacIntel": "Intel Mac OS X 10.15"}.get(cfg["platform"], cfg["platform"])
     if cfg["clear_on_exit"]:
         p["privacy.sanitize.sanitizeOnShutdown"] = True
         for k in ("cache", "cookies", "history", "downloads", "sessions", "offlineApps", "formdata", "siteSettings"):
@@ -178,7 +180,7 @@ def find_browser():
     sys.exit("no Firefox-family browser found: sudo pacman -S firefox")
 
 
-def launch(name):
+def launch(name, url=None):
     d = create(name)
     cfg = load_cfg(name)
     prefs = build_prefs(cfg)
@@ -187,8 +189,8 @@ def launch(name):
     env = dict(os.environ)
     if cfg["timezone"]:
         env["TZ"] = cfg["timezone"]
-        if cfg["resist_fingerprinting"]:
-            print("! timezone is ignored while resist_fingerprinting is on (it forces UTC)")
+    if cfg["resist_fingerprinting"] and (cfg["user_agent"] or cfg["platform"] or cfg["timezone"]):
+        print("! custom UA/platform/timezone set: resist_fingerprinting is off for this launch")
     px = cfg["proxy"]
     if prefs.get("network.proxy.type") == 1:
         print(f"* proxy {px['type']}://{px['host']}:{px['port']} (DNS goes through the proxy)")
@@ -196,7 +198,7 @@ def launch(name):
         print(f"* DNS-over-HTTPS: {cfg['dns']['doh']} (mode {cfg['dns']['mode']})")
     w = cfg["window"]
     cmd = [find_browser(), "--no-remote", "--profile", str(d / "firefox"),
-           "--width", str(w["width"]), "--height", str(w["height"])]
+           "--width", str(w["width"]), "--height", str(w["height"])] + ([url] if url else [])
     subprocess.Popen(cmd, env=env, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print(f"> GhostFox started, profile '{name}'")
@@ -327,6 +329,26 @@ def gui():
     root.mainloop()
 
 
+PRESETS = {
+    "windows": {"user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+                "platform": "Win32", "language": "en-US,en", "timezone": "America/New_York",
+                "resist_fingerprinting": False},
+    "mac": {"user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) Gecko/20100101 Firefox/128.0",
+            "platform": "MacIntel", "language": "en-US,en", "timezone": "America/Los_Angeles",
+            "resist_fingerprinting": False},
+    "rfp": {"user_agent": "", "platform": "", "timezone": "", "language": "en-US,en",
+            "resist_fingerprinting": True},
+}
+
+
+def apply_preset(preset, name):
+    create(name)
+    cfg = load_cfg(name)
+    cfg.update(PRESETS[preset])
+    save_cfg(name, cfg)
+    print(f"+ preset '{preset}' applied to profile '{name}'")
+
+
 def update():
     if not (REPO / ".git").exists():
         sys.exit("not a git checkout, update manually")
@@ -346,6 +368,10 @@ def main():
     sub.add_parser("gui", help="settings window")
     sub.add_parser("rofi", help="rofi menu")
     sub.add_parser("update", help="git pull the latest version")
+    s = sub.add_parser("preset", help="apply a spoofing preset: windows | mac | rfp")
+    s.add_argument("preset", choices=list(PRESETS)); s.add_argument("name", nargs="?", default="default")
+    s = sub.add_parser("check", help="open the page that shows what websites see")
+    s.add_argument("name", nargs="?", default="default")
     a = ap.parse_args()
 
     if a.cmd in (None, "run"):
@@ -365,6 +391,10 @@ def main():
         gui()
     elif a.cmd == "rofi":
         rofi_menu()
+    elif a.cmd == "preset":
+        apply_preset(a.preset, a.name)
+    elif a.cmd == "check":
+        launch(a.name, (REPO / "check.html").as_uri())
     elif a.cmd == "update":
         update()
 
